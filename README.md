@@ -1,4 +1,4 @@
-# Contoso Electronics — Microservices Edition
+# Contoso Electronics - Microservices Edition
 
 This is the microservices version of the Contoso Electronics demo application.
 
