@@ -1,173 +1,242 @@
 # Contoso Electronics — Microservices Edition
 
-A microservices version of the Contoso Electronics e-commerce demo, decomposed from the monolithic architecture into independently deployable services.
+This is the microservices version of the Contoso Electronics demo application.
 
-## Architecture
+The original monolith has been decomposed into independently deployable services. Each service owns its own data and can be built and deployed separately.
+
+The goal of this version is to demonstrate service isolation, inter-service communication, and independent scaling — not to build a production-ready commerce engine.
+
+---
+
+## Architecture Overview
+
+At a high level:
+
+- The **Gateway** is the entry point.
+- The **Product Service** manages catalog data.
+- The **Order Service** creates and retrieves orders.
+- Each service has its own MongoDB database.
+- The frontend is built once and served by the Gateway.
 
 ```
-┌────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Client   │────▶│     Gateway      │────▶│ Product Service  │
-│  (React)   │     │  (port 3000)     │     │   (port 3001)    │
-└────────────┘     │  - Proxy routing  │     │   - CRUD ops     │
-                   │  - Static files   │     │   - Batch lookup │
-                   │  - Health agg.    │     │   - Own MongoDB  │
-                   └──────┬───────────┘     └─────────────────┘
-                          │
-                          └───────────────▶┌─────────────────┐
-                                           │  Order Service   │
-                                           │   (port 3002)    │
-                                           │  - Create/Get    │
-                                           │  - Calls Product │
-                                           │    Service       │
-                                           │  - Own MongoDB   │
-                                           └─────────────────┘
+Client (React)
+      │
+      ▼
+Gateway (:3000)
+      │
+      ├──▶ Product Service (:3001)
+      │
+      └──▶ Order Service (:3002)
 ```
 
-### Services
+The client never talks directly to backend services.  
+All traffic goes through the Gateway.
 
-| Service | Port | Description |
-|---------|------|-------------|
-| **gateway** | 3000 | API Gateway — proxies requests, serves React build, aggregates health checks |
-| **product-service** | 3001 | Product catalog CRUD + batch lookup for inter-service calls |
-| **order-service** | 3002 | Order creation (calls product-service for price validation) and retrieval |
-| **client** | — | React 18 SPA, built and served by the gateway as static files |
+---
 
-### Key Design Decisions
+## Services
 
-- **Database per service**: Each service has its own MongoDB database (`contoso_products`, `contoso_orders`)
-- **Denormalized orders**: Order items store `productName` and `price` at order time (no cross-service joins)
-- **Synchronous inter-service communication**: Order service calls product service via HTTP for price validation
-- **API Gateway pattern**: All client traffic routes through the gateway; no direct client-to-service calls
+| Service | Port | Responsibility |
+|----------|------|----------------|
+| `gateway` | 3000 | API routing, serves static React build, aggregates health checks |
+| `product-service` | 3001 | Product CRUD operations and batch lookup |
+| `order-service` | 3002 | Order creation and retrieval |
+| `client` | — | React SPA, built and served by the gateway |
+
+---
+
+## Design Notes
+
+A few deliberate architectural choices:
+
+- **Database per service**  
+  Each service owns its own MongoDB database:
+  - `contoso_products`
+  - `contoso_orders`
+
+- **Denormalized order data**  
+  Orders store product name and price at time of purchase to avoid cross-service joins.
+
+- **Synchronous communication**  
+  The order service calls the product service over HTTP to validate pricing.
+
+- **Gateway pattern**  
+  The gateway acts as the single entry point for client traffic.
+
+This setup keeps responsibilities clean and makes services independently deployable.
+
+---
 
 ## Project Structure
 
 ```
 Microservices/
-├── client/                  # React frontend
-│   ├── public/
-│   ├── src/
-│   │   ├── pages/           # Home, Admin, Cart, OrderConfirm
-│   │   ├── api.js           # API client (relative /api/* calls)
-│   │   ├── CartContext.js    # Cart state management
-│   │   ├── App.js           # Router + layout
-│   │   └── index.css        # Styles
-│   └── package.json
+├── client/
 ├── product-service/
-│   ├── src/
-│   │   ├── config/db.js
-│   │   ├── models/Product.js
-│   │   ├── controllers/productController.js
-│   │   ├── routes/products.js
-│   │   ├── middleware/errorHandler.js
-│   │   ├── app.js
-│   │   └── server.js
-│   ├── tests/product.test.js
-│   ├── Dockerfile
-│   └── package.json
 ├── order-service/
-│   ├── src/
-│   │   ├── config/db.js
-│   │   ├── models/Order.js
-│   │   ├── clients/productClient.js
-│   │   ├── controllers/orderController.js
-│   │   ├── routes/orders.js
-│   │   ├── middleware/errorHandler.js
-│   │   ├── app.js
-│   │   └── server.js
-│   ├── tests/order.test.js
-│   ├── Dockerfile
-│   └── package.json
 ├── gateway/
-│   ├── src/
-│   │   ├── app.js
-│   │   └── server.js
-│   └── package.json
 ├── docker-compose.yml
 ├── Dockerfile.gateway
 └── README.md
 ```
 
-## Quick Start
+Each service has:
 
-### With Docker Compose (recommended)
+- Its own `package.json`
+- Its own Dockerfile
+- Its own test suite (where applicable)
+
+---
+
+## Running with Docker (Recommended)
+
+This is the easiest way to run everything locally.
 
 ```bash
 docker-compose up --build
 ```
 
-Open http://localhost:3000
+Once started, open:
 
-### Without Docker (local development)
+```
+http://localhost:3000
+```
 
-**Prerequisites**: Node.js 20+, MongoDB running on `localhost:27017`
+The gateway will route requests to downstream services.
+
+---
+
+## Running Without Docker (Local Dev)
+
+Prerequisites:
+
+- Node.js 20+
+- MongoDB running on `localhost:27017`
+
+Install dependencies for each service:
 
 ```bash
-# Install all dependencies
 cd product-service && npm install && cd ..
 cd order-service && npm install && cd ..
 cd gateway && npm install && cd ..
 cd client && npm install && cd ..
-
-# Build the React client
-cd client && npm run build && cd ..
-
-# Copy the build to gateway
-cp -r client/build gateway/public
-
-# Start services (each in a separate terminal)
-cd product-service && MONGO_URI=mongodb://localhost:27017/contoso_products npm start
-cd order-service && MONGO_URI=mongodb://localhost:27017/contoso_orders PRODUCT_SERVICE_URL=http://localhost:3001 npm start
-cd gateway && PRODUCT_SERVICE_URL=http://localhost:3001 ORDER_SERVICE_URL=http://localhost:3002 npm start
 ```
+
+Build the frontend:
+
+```bash
+cd client
+npm run build
+cd ..
+```
+
+Copy the build output to the gateway:
+
+```bash
+cp -r client/build gateway/public
+```
+
+Start services in separate terminals:
+
+```bash
+# Product Service
+cd product-service
+MONGO_URI=mongodb://localhost:27017/contoso_products npm start
+```
+
+```bash
+# Order Service
+cd order-service
+MONGO_URI=mongodb://localhost:27017/contoso_orders \
+PRODUCT_SERVICE_URL=http://localhost:3001 npm start
+```
+
+```bash
+# Gateway
+cd gateway
+PRODUCT_SERVICE_URL=http://localhost:3001 \
+ORDER_SERVICE_URL=http://localhost:3002 npm start
+```
+
+---
 
 ## API Endpoints
 
-### Product Service (via Gateway on :3000)
+All client requests go through the gateway on port 3000.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/products` | List all products |
-| GET | `/api/products/:id` | Get product by ID |
-| POST | `/api/products` | Create a product |
-| DELETE | `/api/products/:id` | Delete a product |
-| POST | `/api/products/batch` | Get products by IDs (internal) |
+### Product Routes
 
-### Order Service (via Gateway on :3000)
+- `GET /api/products`
+- `GET /api/products/:id`
+- `POST /api/products`
+- `DELETE /api/products/:id`
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/orders` | Create an order |
-| GET | `/api/orders/:id` | Get order by ID |
+### Order Routes
 
-### Health Checks
+- `POST /api/orders`
+- `GET /api/orders/:id`
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET :3000/health` | Gateway + aggregated downstream status |
-| `GET :3001/health` | Product service health |
-| `GET :3002/health` | Order service health |
+---
 
-## Running Tests
+## Health Endpoints
+
+- `GET /health` (via gateway) — aggregated status
+- `GET :3001/health` — product service
+- `GET :3002/health` — order service
+
+Useful for container health checks and deployment validation.
+
+---
+
+## Tests
+
+Run tests per service:
 
 ```bash
-# Product service tests (9 tests)
 cd product-service && npm test
+```
 
-# Order service tests (6 tests, mocks product client)
+```bash
 cd order-service && npm test
 ```
 
+The order service mocks calls to the product service during testing.
+
+---
+
 ## Environment Variables
 
-| Variable | Service | Default | Description |
-|----------|---------|---------|-------------|
-| `PORT` | All | 3000/3001/3002 | Service port |
-| `MONGO_URI` | product/order | `mongodb://localhost:27017/contoso_*` | MongoDB connection string |
-| `PRODUCT_SERVICE_URL` | order/gateway | `http://localhost:3001` | Product service base URL |
-| `ORDER_SERVICE_URL` | gateway | `http://localhost:3002` | Order service base URL |
+Common variables:
 
-## Azure Deployment
+| Variable | Used By | Purpose |
+|----------|----------|----------|
+| `PORT` | All services | Service port |
+| `MONGO_URI` | product/order | MongoDB connection string |
+| `PRODUCT_SERVICE_URL` | order/gateway | Base URL for product service |
+| `ORDER_SERVICE_URL` | gateway | Base URL for order service |
 
-For Azure deployment, replace `MONGO_URI` with your **Azure Cosmos DB (MongoDB API)** connection string. The wire protocol is fully compatible — no code changes needed.
+---
 
-Each service can be deployed as a separate **Azure App Service** or **Azure Container App**, with the gateway serving as the public entry point.
+## Azure Deployment Notes
+
+When deploying to Azure:
+
+- Replace `MONGO_URI` with your Cosmos DB (MongoDB API) connection string.
+- Each service can be deployed independently.
+- The gateway should be exposed as the public entry point.
+- Health endpoints can be used for readiness/liveness probes.
+
+No code changes are required for Cosmos DB (MongoDB API compatibility).
+
+---
+
+## Purpose of This Repository
+
+This project is meant to:
+
+- Demonstrate microservices architecture concepts
+- Support CI/CD pipeline experiments
+- Validate container-based deployments
+- Showcase independent service lifecycle management
+
+It is intentionally simple to keep the focus on DevOps and delivery workflows.
