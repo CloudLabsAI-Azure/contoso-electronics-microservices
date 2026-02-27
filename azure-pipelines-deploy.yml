@@ -1,0 +1,98 @@
+
+
+trigger: none   # Manual trigger only
+
+variables:
+  azureSubscription: 'azure-service-connection'
+  aksResourceGroup: 'rg-contoso-micro-prod'
+  aksClusterName: 'aks-contoso-micro-prod'
+  acrLoginServer: 'acrcontosomicroprod.azurecr.io'
+  namespace: 'contoso'
+  # PRODUCT_MONGO_URI - set as secret variable in Azure DevOps
+  # ORDER_MONGO_URI   - set as secret variable in Azure DevOps
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: Deploy
+    displayName: 'Deploy to AKS'
+    jobs:
+      - job: DeployMicroservices
+        displayName: 'Deploy All Microservices'
+        steps:
+          # ------------------------------------------------------------------
+          # Step 1: Get AKS credentials and deploy everything
+          # ------------------------------------------------------------------
+          - task: AzureCLI@2
+            displayName: 'Deploy microservices to AKS'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+
+                echo "========================================="
+                echo "  Getting AKS Credentials"
+                echo "========================================="
+                az aks get-credentials \
+                  --resource-group $(aksResourceGroup) \
+                  --name $(aksClusterName) \
+                  --overwrite-existing
+
+                echo "========================================="
+                echo "  Creating Namespace"
+                echo "========================================="
+                kubectl apply -f $(Build.SourcesDirectory)/k8s/namespace.yaml
+
+                echo "========================================="
+                echo "  Creating Cosmos DB Secrets"
+                echo "========================================="
+                kubectl delete secret cosmos-secrets -n $(namespace) --ignore-not-found
+                kubectl create secret generic cosmos-secrets \
+                  -n $(namespace) \
+                  --from-literal=product-mongo-uri="$(PRODUCT_MONGO_URI)" \
+                  --from-literal=order-mongo-uri="$(ORDER_MONGO_URI)"
+
+                echo "========================================="
+                echo "  Deploying Product Service"
+                echo "========================================="
+                kubectl apply -f $(Build.SourcesDirectory)/k8s/product-service.yaml
+
+                echo "========================================="
+                echo "  Deploying Order Service"
+                echo "========================================="
+                kubectl apply -f $(Build.SourcesDirectory)/k8s/order-service.yaml
+
+                echo "========================================="
+                echo "  Deploying Gateway"
+                echo "========================================="
+                kubectl apply -f $(Build.SourcesDirectory)/k8s/gateway.yaml
+
+                echo "========================================="
+                echo "  Deploying Ingress"
+                echo "========================================="
+                kubectl apply -f $(Build.SourcesDirectory)/k8s/ingress.yaml
+
+                echo "========================================="
+                echo "  Waiting for Rollouts"
+                echo "========================================="
+                kubectl rollout status deployment/product-service -n $(namespace) --timeout=180s
+                kubectl rollout status deployment/order-service -n $(namespace) --timeout=180s
+                kubectl rollout status deployment/gateway -n $(namespace) --timeout=180s
+
+                echo "========================================="
+                echo "  Deployment Summary"
+                echo "========================================="
+                echo ""
+                echo "--- Pods ---"
+                kubectl get pods -n $(namespace) -o wide
+                echo ""
+                echo "--- Services ---"
+                kubectl get svc -n $(namespace)
+                echo ""
+                echo "--- Ingress ---"
+                kubectl get ingress -n $(namespace)
+                echo ""
+                echo "Deployment complete!"

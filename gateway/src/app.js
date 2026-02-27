@@ -47,7 +47,7 @@ app.use('/api/orders', createProxyMiddleware({
   changeOrigin: true
 }));
 
-const clientBuild = path.join(__dirname, '../../client/build');
+const clientBuild = path.join(__dirname, '../public');
 app.use(express.static(clientBuild));
 app.get('*', (_req, res) => {
   res.sendFile(path.join(clientBuild, 'index.html'));
