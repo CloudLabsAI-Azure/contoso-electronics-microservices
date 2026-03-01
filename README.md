@@ -1,69 +1,135 @@
-# Contoso Electronics - Microservices Edition
+# Contoso Electronics — Microservices
 
-This is the microservices version of the Contoso Electronics demo application.
-
-The original monolith has been decomposed into independently deployable services. Each service owns its own data and can be built and deployed separately.
-
-The goal of this version is to demonstrate service isolation, inter-service communication, and independent scaling — not to build a production-ready commerce engine.
+The same Contoso Electronics e-commerce application, decomposed into independently deployable services. Each service owns its data, has its own Dockerfile, and can be built, tested, and deployed on its own.
 
 ---
 
-## Architecture Overview
+## Application Overview
 
-At a high level:
+This application is split into **three backend services** and a **React frontend**:
 
-- The **Gateway** is the entry point.
-- The **Product Service** manages catalog data.
-- The **Order Service** creates and retrieves orders.
-- Each service has its own MongoDB database.
-- The frontend is built once and served by the Gateway.
+- **Product Service** — manages the product catalog (CRUD operations).
+- **Order Service** — handles order placement and retrieval; calls the Product Service internally to validate items.
+- **Gateway** — the single entry point for all client traffic; routes API requests to the appropriate backend service and serves the React frontend.
+- **Client** — a React SPA that is compiled at build time and served as static files by the Gateway.
+
+Each backend service connects to its **own separate database**. There is no shared database.
+
+---
+
+## Architecture
 
 ```
-Client (React)
-      │
-      ▼
-Gateway (:3000)
-      │
-      ├──▶ Product Service (:3001)
-      │
-      └──▶ Order Service (:3002)
+                    ┌──────────────┐
+                    │    Client    │
+                    │   (React)   │
+                    └──────┬───────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │   Gateway    │
+                    │  (port 3000) │
+                    └──┬───────┬───┘
+                       │       │
+              ┌────────▼──┐ ┌──▼─────────┐
+              │  Product   │ │   Order    │
+              │  Service   │ │  Service   │
+              │ (port 3001)│ │(port 3002) │
+              └─────┬──────┘ └──┬─────────┘
+                    │           │
+                    ▼           ▼
+              ┌──────────┐ ┌──────────┐
+              │ products │ │  orders  │
+              │   DB     │ │   DB     │
+              └──────────┘ └──────────┘
 ```
 
-The client never talks directly to backend services.  
-All traffic goes through the Gateway.
+- The client **never** talks directly to Product Service or Order Service.
+- All traffic flows through the **Gateway**.
+- Order Service calls Product Service over HTTP to validate product data at order time.
 
 ---
 
-## Services
+## Key Components
 
-| Service | Port | Responsibility |
-|----------|------|----------------|
-| `gateway` | 3000 | API routing, serves static React build, aggregates health checks |
-| `product-service` | 3001 | Product CRUD operations and batch lookup |
-| `order-service` | 3002 | Order creation and retrieval |
-| `client` | — | React SPA, built and served by the gateway |
+| Component | Location | Port | What It Does |
+|-----------|----------|------|--------------|
+| Product Service | `product-service/` | 3001 | Product CRUD, connects to its own MongoDB database |
+| Order Service | `order-service/` | 3002 | Order creation/retrieval, calls Product Service internally |
+| Gateway | `gateway/` | 3000 | Routes `/api/products/*` and `/api/orders/*` to backend services, serves React static files |
+| React Client | `client/` | — | Built once at image build time, served by Gateway |
 
 ---
 
-## Design Notes
+## Dockerfiles — What Builds What
 
-A few deliberate architectural choices:
+| Dockerfile | Location | What It Produces |
+|------------|----------|-----------------|
+| `product-service/Dockerfile` | Inside `product-service/` | Standalone image for the product API |
+| `order-service/Dockerfile` | Inside `order-service/` | Standalone image for the order API |
+| `Dockerfile.gateway` | Repo root | **Multi-stage** — builds the React client first, then packages the Gateway with the compiled frontend |
 
-- **Database per service**  
-  Each service owns its own MongoDB database:
-  - `contoso_products`
-  - `contoso_orders`
+> **Note:** The Gateway Dockerfile lives at the **repo root** (not inside `gateway/`) because it needs access to both the `client/` and `gateway/` directories during the build. Pay attention to the Docker **build context** when constructing your build commands.
 
-- **Denormalized order data**  
-  Orders store product name and price at time of purchase to avoid cross-service joins.
+---
 
-- **Synchronous communication**  
-  The order service calls the product service over HTTP to validate pricing.
+## Environment Variables
 
-- **Gateway pattern**  
-  The gateway acts as the single entry point for client traffic.
+Each service expects different configuration at runtime:
 
-This setup keeps responsibilities clean and makes services independently deployable.
+| Variable | Used By | Purpose |
+|----------|---------|---------|
+| `PORT` | All services | The port the service listens on |
+| `MONGO_URI` | Product Service, Order Service | MongoDB (or Cosmos DB) connection string — **each service uses a different database** |
+| `PRODUCT_SERVICE_URL` | Order Service, Gateway | Internal URL to reach the Product Service |
+| `ORDER_SERVICE_URL` | Gateway | Internal URL to reach the Order Service |
+
+- Product Service needs: `PORT`, `MONGO_URI`
+- Order Service needs: `PORT`, `MONGO_URI`, `PRODUCT_SERVICE_URL`
+- Gateway needs: `PORT`, `PRODUCT_SERVICE_URL`, `ORDER_SERVICE_URL`
+
+---
+
+## Inter-Service Communication
+
+Services discover each other through **environment variables**, not hard-coded URLs. In a container orchestrator, these URLs map to internal DNS names or service endpoints. The Gateway fans out incoming API calls to the correct upstream service.
+
+---
+
+## Database Design
+
+| Service | Database Name | Collections |
+|---------|--------------|-------------|
+| Product Service | `contoso_products` | products |
+| Order Service | `contoso_orders` | orders |
+
+Orders store a **snapshot** of product name and price at the time of purchase (denormalized). This avoids cross-service database joins.
+
+Both databases are compatible with **Azure Cosmos DB (MongoDB API)** — no code changes required.
+
+---
+
+## Health Endpoints
+
+| Endpoint | Service | Notes |
+|----------|---------|-------|
+| `GET :3001/health` | Product Service | Direct health check |
+| `GET :3002/health` | Order Service | Direct health check |
+| `GET :3000/health` | Gateway | Aggregated — checks itself + both downstream services |
+
+These are useful for container health checks, readiness/liveness probes, and deployment validation.
+
+---
+
+## API Endpoints (via Gateway on port 3000)
+
+| Method | Path | Routed To |
+|--------|------|-----------|
+| `GET` | `/api/products` | Product Service |
+| `POST` | `/api/products` | Product Service |
+| `DELETE` | `/api/products/:id` | Product Service |
+| `POST` | `/api/orders` | Order Service |
+| `GET` | `/api/orders/:id` | Order Service |
 
 ---
 
@@ -71,172 +137,40 @@ This setup keeps responsibilities clean and makes services independently deploya
 
 ```
 Microservices/
-├── client/
-├── product-service/
-├── order-service/
-├── gateway/
-├── docker-compose.yml
-├── Dockerfile.gateway
-└── README.md
-```
-
-Each service has:
-
-- Its own `package.json`
-- Its own Dockerfile
-- Its own test suite (where applicable)
-
----
-
-## Running with Docker (Recommended)
-
-This is the easiest way to run everything locally.
-
-```bash
-docker-compose up --build
-```
-
-Once started, open:
-
-```
-http://localhost:3000
-```
-
-The gateway will route requests to downstream services.
-
----
-
-## Running Without Docker (Local Dev)
-
-Prerequisites:
-
-- Node.js 20+
-- MongoDB running on `localhost:27017`
-
-Install dependencies for each service:
-
-```bash
-cd product-service && npm install && cd ..
-cd order-service && npm install && cd ..
-cd gateway && npm install && cd ..
-cd client && npm install && cd ..
-```
-
-Build the frontend:
-
-```bash
-cd client
-npm run build
-cd ..
-```
-
-Copy the build output to the gateway:
-
-```bash
-cp -r client/build gateway/public
-```
-
-Start services in separate terminals:
-
-```bash
-# Product Service
-cd product-service
-MONGO_URI=mongodb://localhost:27017/contoso_products npm start
-```
-
-```bash
-# Order Service
-cd order-service
-MONGO_URI=mongodb://localhost:27017/contoso_orders \
-PRODUCT_SERVICE_URL=http://localhost:3001 npm start
-```
-
-```bash
-# Gateway
-cd gateway
-PRODUCT_SERVICE_URL=http://localhost:3001 \
-ORDER_SERVICE_URL=http://localhost:3002 npm start
+├── client/                  # React SPA source
+│   ├── src/
+│   └── package.json
+├── product-service/         # Product API
+│   ├── src/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── package.json
+├── order-service/           # Order API
+│   ├── src/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── package.json
+├── gateway/                 # API Gateway + serves frontend
+│   ├── src/
+│   └── package.json
+├── Dockerfile.gateway       # Multi-stage build (client + gateway)
+├── docker-compose.yml       # Local dev — runs everything + MongoDB
+└── k8s/                     # Kubernetes manifests for AKS deployment
+    ├── namespace.yaml
+    ├── product-service.yaml
+    ├── order-service.yaml
+    ├── gateway.yaml
+    └── ingress.yaml
 ```
 
 ---
 
-## API Endpoints
+## Hints
 
-All client requests go through the gateway on port 3000.
-
-### Product Routes
-
-- `GET /api/products`
-- `GET /api/products/:id`
-- `POST /api/products`
-- `DELETE /api/products/:id`
-
-### Order Routes
-
-- `POST /api/orders`
-- `GET /api/orders/:id`
-
----
-
-## Health Endpoints
-
-- `GET /health` (via gateway) — aggregated status
-- `GET :3001/health` — product service
-- `GET :3002/health` — order service
-
-Useful for container health checks and deployment validation.
-
----
-
-## Tests
-
-Run tests per service:
-
-```bash
-cd product-service && npm test
-```
-
-```bash
-cd order-service && npm test
-```
-
-The order service mocks calls to the product service during testing.
-
----
-
-## Environment Variables
-
-Common variables:
-
-| Variable | Used By | Purpose |
-|----------|----------|----------|
-| `PORT` | All services | Service port |
-| `MONGO_URI` | product/order | MongoDB connection string |
-| `PRODUCT_SERVICE_URL` | order/gateway | Base URL for product service |
-| `ORDER_SERVICE_URL` | gateway | Base URL for order service |
-
----
-
-## Azure Deployment Notes
-
-When deploying to Azure:
-
-- Replace `MONGO_URI` with your Cosmos DB (MongoDB API) connection string.
-- Each service can be deployed independently.
-- The gateway should be exposed as the public entry point.
-- Health endpoints can be used for readiness/liveness probes.
-
-No code changes are required for Cosmos DB (MongoDB API compatibility).
-
----
-
-## Purpose of This Repository
-
-This project is meant to:
-
-- Demonstrate microservices architecture concepts
-- Support CI/CD pipeline experiments
-- Validate container-based deployments
-- Showcase independent service lifecycle management
-
-It is intentionally simple to keep the focus on DevOps and delivery workflows.
+- There are **three separate images** to build — not one. Each has its own Dockerfile.
+- The Gateway Dockerfile has a different build context than the other two. Look at where it lives.
+- Services talk to each other via **URLs passed as environment variables** — in Kubernetes, these become internal service DNS names.
+- Each service needs its **own database connection string** — they don't share a database.
+- The `k8s/` folder contains Kubernetes manifests if you're deploying to AKS. Study how they reference images, secrets, and service discovery.
+- The `docker-compose.yml` shows how all the pieces fit together locally — it's a useful reference for understanding the relationships between services.
+- For Azure deployments, swap `MONGO_URI` values with Cosmos DB connection strings. Nothing else changes.
